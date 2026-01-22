@@ -192,9 +192,11 @@ function fetchProjectName($projectUri) {
  * Fetch all comments for an issue to get contributors
  *
  * @param int $nid The issue node ID
+ * @param string $sprintStartDate The sprint start date for filtering comments
  * @return array List of unique usernames (commenters and author)
  */
-function fetchIssueContributors($nid) {
+function fetchIssueContributors($nid, $sprintStartDate) {
+    $sprintStartTimestamp = strtotime($sprintStartDate);
     $contributors = [];
     $page = 0;
     $hasMorePages = true;
@@ -208,6 +210,11 @@ function fetchIssueContributors($nid) {
         }
 
         foreach ($response['list'] as $comment) {
+            // Only include comments made after sprint start date.
+            $createdTimestamp = (int)($comment['created'] ?? 0);
+            if ($createdTimestamp < $sprintStartTimestamp) {
+                continue;
+            }
             if (isset($comment['name']) && !empty($comment['name'])) {
                 $contributors[$comment['name']] = true;
             }
@@ -252,8 +259,9 @@ function formatTimestamp($timestamp) {
  * @param array $issues List of issue data from API
  * @param string $issuesCsvPath Path for issues CSV output
  * @param string $contributorsCsvPath Path for contributors CSV output
+ * @param string $sprintStartDate The sprint start date for filtering issues
  */
-function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath) {
+function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sprintStartDate) {
     echo "Processing " . count($issues) . " issues...\n\n";
 
     // Open CSV files
@@ -364,7 +372,7 @@ function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath) {
         ]);
 
         // Fetch contributors (commenters + author)
-        $contributors = fetchIssueContributors($nid);
+        $contributors = fetchIssueContributors($nid, $sprintStartDate);
 
         // Add issue author if available
         if (isset($issue['author']['id'])) {
@@ -439,7 +447,7 @@ function main($sprintStartDate, $taxonomyId, $outputDir = '.') {
     }
 
     // Process issues and create CSVs
-    processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath);
+    processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sprintStartDate);
 
     echo "\n=== Done ===\n";
 }
