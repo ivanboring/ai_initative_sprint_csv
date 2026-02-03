@@ -340,6 +340,16 @@ function fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate) {
 
             $commentDate = date('Y-m-d H:i:s', $commentTimestamp);
 
+            // Extract commenter username from the submitted div
+            $commenter = '';
+            $submittedDiv = $xpath->query('.//div[contains(@class, "submitted")]', $comment);
+            if ($submittedDiv->length > 0) {
+                $commenterLink = $xpath->query('.//a[contains(@class, "username")]', $submittedDiv->item(0));
+                if ($commenterLink->length > 0) {
+                    $commenter = trim($commenterLink->item(0)->textContent);
+                }
+            }
+
             // Find the nodechanges table
             $tables = $xpath->query('.//table[contains(@class, "nodechanges-field-changes")]', $comment);
             if ($tables->length === 0) {
@@ -373,9 +383,9 @@ function fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate) {
                     $newText = trim($newNode->textContent ?? '');
                     $statusAtTime = ltrim($newText, '» ');
                 }
-                echo $nid . ' ' . $statusAtTime . "\n";
 
                 if ($label === 'Assigned:') {
+                    print_r($comment);
                     // Extract old assignee (could be a link or text)
                     $oldLink = $xpath->query('.//a[contains(@class, "username")]', $oldNode);
                     if ($oldLink->length > 0) {
@@ -401,8 +411,9 @@ function fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate) {
                 if (!empty($assignedOld) && strtolower($assignedOld) !== 'unassigned') {
                     $events[] = [
                         'contributor' => $assignedOld,
-                        'date' => $commentDate,
+                        'commenter' => $commenter,
                         'type' => 'unassigned',
+                        'date' => $commentDate,
                         'status' => $statusAtTime,
                     ];
                 }
@@ -411,8 +422,9 @@ function fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate) {
                 if (!empty($assignedNew) && strtolower($assignedNew) !== 'unassigned') {
                     $events[] = [
                         'contributor' => $assignedNew,
-                        'date' => $commentDate,
+                        'commenter' => $commenter,
                         'type' => 'assigned',
+                        'date' => $commentDate,
                         'status' => $statusAtTime,
                     ];
                 }
@@ -497,6 +509,7 @@ function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $as
         'link',
         'project',
         'contributor',
+        'commenter',
         'type',
         'date',
         'status'
@@ -610,6 +623,7 @@ function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $as
                 $link,
                 $projectName,
                 $event['contributor'],
+                $event['commenter'],
                 $event['type'],
                 $event['date'],
                 $event['status']
