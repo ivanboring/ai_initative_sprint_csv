@@ -2,6 +2,14 @@
 
 This project contains a PHP script to fetch and generate CSV reports on the current status of issues tagged for the AI Initiative Sprint on Drupal.org.
 
+## Install
+1. Clone this repository.
+2. Run `composer install` to install dependencies.
+3. Install chromium or chrome on your system, this is required for the headless browser to work. On Ubuntu you can run:
+   ```bash
+   sudo apt install chromium-browser
+   ```
+
 ## Usage
 
 Run the script from the command line, providing the sprint start date and optionally the taxonomy ID for the AI Initiative Sprint tag.

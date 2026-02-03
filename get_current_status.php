@@ -1,15 +1,24 @@
 <?php
+
+
+include('vendor/autoload.php');
+
+use HeadlessChromium\BrowserFactory;
+use HeadlessChromium\Page;
+
 /**
  * Drupal.org Issue Status Collector
  *
- * Collects issues from Drupal.org API based on a sprint start date and taxonomy tag.
- * Creates two CSV files:
+ * Collects issues from Drupal.org API based on a sprint date range and taxonomy tag.
+ * Creates three CSV files:
  * 1. Issues CSV - Contains issue details with status and timing information
  * 2. Contributors CSV - Contains issue details with contributor usernames
+ * 3. Assignments CSV - Contains assignment/unassignment events with dates and status
  */
 
 // Configuration
 define('API_BASE_URL', 'https://www.drupal.org/api-d7');
+define('COMMENT_BASE_URL', 'https://www.drupal.org'); // Base URL for issue comments
 define('API_DELAY_SECONDS', 1); // Delay between API calls to not overload server
 define('API_PAGE_LIMIT', 50); // Max items per page
 
@@ -83,13 +92,14 @@ function apiRequest($url) {
 }
 
 /**
- * Get all issues matching the taxonomy tag, filtering by sprint start date
+ * Get all issues matching the taxonomy tag, filtering by sprint date range
  *
  * @param string $sprintStartDate Sprint start date (YYYY-MM-DD format)
+ * @param string|null $sprintEndDate Sprint end date (YYYY-MM-DD format), null for no end date
  * @param int $taxonomyId The taxonomy term ID for the tag
  * @return array List of issue data
  */
-function fetchAllIssues($sprintStartDate, $taxonomyId) {
+function fetchAllIssues($sprintStartDate, $sprintEndDate, $taxonomyId) {
     $sprintStartTimestamp = strtotime($sprintStartDate);
 
     if ($sprintStartTimestamp === false) {
@@ -97,7 +107,19 @@ function fetchAllIssues($sprintStartDate, $taxonomyId) {
         return [];
     }
 
+    $sprintEndTimestamp = null;
+    if ($sprintEndDate !== null) {
+        $sprintEndTimestamp = strtotime($sprintEndDate . ' 23:59:59');
+        if ($sprintEndTimestamp === false) {
+            echo "ERROR: Invalid sprint end date format. Use YYYY-MM-DD.\n";
+            return [];
+        }
+    }
+
     echo "Sprint start date: $sprintStartDate (timestamp: $sprintStartTimestamp)\n";
+    if ($sprintEndTimestamp !== null) {
+        echo "Sprint end date: $sprintEndDate (timestamp: $sprintEndTimestamp)\n";
+    }
     echo "Fetching issues with taxonomy ID: $taxonomyId\n\n";
 
     $issues = [];
@@ -133,8 +155,11 @@ function fetchAllIssues($sprintStartDate, $taxonomyId) {
                 $oldestOnPage = $changedTimestamp;
             }
 
-            // Include if created OR changed after sprint start
-            if ($changedTimestamp >= $sprintStartTimestamp || $createdTimestamp >= $sprintStartTimestamp) {
+            // Include if created OR changed after sprint start (and before end date if specified)
+            $afterStart = ($changedTimestamp >= $sprintStartTimestamp || $createdTimestamp >= $sprintStartTimestamp);
+            $beforeEnd = ($sprintEndTimestamp === null || $createdTimestamp <= $sprintEndTimestamp || $changedTimestamp <= $sprintEndTimestamp);
+
+            if ($afterStart && $beforeEnd) {
                 $issues[] = $issue;
                 $pageIssueCount++;
             }
@@ -193,10 +218,12 @@ function fetchProjectName($projectUri) {
  *
  * @param int $nid The issue node ID
  * @param string $sprintStartDate The sprint start date for filtering comments
+ * @param string|null $sprintEndDate The sprint end date for filtering comments
  * @return array List of unique usernames (commenters and author)
  */
-function fetchIssueContributors($nid, $sprintStartDate) {
+function fetchIssueContributors($nid, $sprintStartDate, $sprintEndDate) {
     $sprintStartTimestamp = strtotime($sprintStartDate);
+    $sprintEndTimestamp = $sprintEndDate !== null ? strtotime($sprintEndDate . ' 23:59:59') : null;
     $contributors = [];
     $page = 0;
     $hasMorePages = true;
@@ -210,9 +237,12 @@ function fetchIssueContributors($nid, $sprintStartDate) {
         }
 
         foreach ($response['list'] as $comment) {
-            // Only include comments made after sprint start date.
+            // Only include comments made within sprint date range.
             $createdTimestamp = (int)($comment['created'] ?? 0);
             if ($createdTimestamp < $sprintStartTimestamp) {
+                continue;
+            }
+            if ($sprintEndTimestamp !== null && $createdTimestamp > $sprintEndTimestamp) {
                 continue;
             }
             if (isset($comment['name']) && !empty($comment['name'])) {
@@ -241,6 +271,167 @@ function getStatusLabel($statusCode) {
 }
 
 /**
+ * Fetch assignment events for an issue by scraping the issue page
+ *
+ * @param int $nid The issue node ID
+ * @param string $sprintStartDate The sprint start date for filtering
+ * @param string|null $sprintEndDate The sprint end date for filtering
+ * @return array List of assignment events with contributor, date, type (assigned/unassigned), and status
+ */
+function fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate) {
+    $sprintStartTimestamp = strtotime($sprintStartDate);
+    $sprintEndTimestamp = $sprintEndDate !== null ? strtotime($sprintEndDate . ' 23:59:59') : null;
+    $events = [];
+    $pageNum = 0;
+    $hasMorePages = true;
+    $browserFactory = new BrowserFactory();
+
+    while ($hasMorePages) {
+        $url = COMMENT_BASE_URL . "/node/$nid";
+        if ($pageNum > 0) {
+            $url .= "?page=$pageNum";
+        }
+
+        echo "  Scraping assignments from: $url\n";
+
+        $browser = $browserFactory->createBrowser([
+            'startupTimeout' => 60,
+            'headless' => false,
+        ]);
+
+        try {
+            $page = $browser->createPage();
+            $page->navigate($url)->waitForNavigation(Page::DOM_CONTENT_LOADED, 60000);
+            $html = $page->getHtml();
+        } finally {
+            $browser->close();
+        }
+
+        // Parse HTML with DOMDocument
+        $doc = new DOMDocument();
+        @$doc->loadHTML($html, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+        $xpath = new DOMXPath($doc);
+
+        // Find all comment sections - they have class "comment"
+        $comments = $xpath->query('//section[contains(@class, "comments")] | //div[contains(@class, "comment") and contains(@class, "clearfix")]');
+
+        if ($comments->length === 0) {
+            // No comments found on this page
+            break;
+        }
+
+        $statusAtTime = 'Active'; // Default status
+        foreach ($comments as $comment) {
+            // Extract timestamp from <time pubdate datetime="...">
+            $timeNodes = $xpath->query('.//time[@datetime]', $comment);
+            if ($timeNodes->length === 0) {
+                continue;
+            }
+            $datetime = $timeNodes->item(0)->getAttribute('datetime');
+            $commentTimestamp = strtotime($datetime);
+
+            // Filter by date range
+            if ($commentTimestamp < $sprintStartTimestamp) {
+                continue;
+            }
+            if ($sprintEndTimestamp !== null && $commentTimestamp > $sprintEndTimestamp) {
+                continue;
+            }
+
+            $commentDate = date('Y-m-d H:i:s', $commentTimestamp);
+
+            // Find the nodechanges table
+            $tables = $xpath->query('.//table[contains(@class, "nodechanges-field-changes")]', $comment);
+            if ($tables->length === 0) {
+                continue;
+            }
+
+            $table = $tables->item(0);
+
+            // Query all change rows at once from the table
+            $labelNodes = $xpath->query('.//td[contains(@class, "nodechanges-label")]', $table);
+            $oldNodes = $xpath->query('.//td[contains(@class, "nodechanges-old")]', $table);
+            $newNodes = $xpath->query('.//td[contains(@class, "nodechanges-new")]', $table);
+
+            $assignedOld = null;
+            $assignedNew = null;
+
+            // Iterate through all changes
+            for ($i = 0; $i < $labelNodes->length; $i++) {
+                $labelNode = $labelNodes->item($i);
+                $oldNode = $oldNodes->item($i);
+                $newNode = $newNodes->item($i);
+
+                if (!$labelNode) {
+                    continue;
+                }
+
+                $label = trim($labelNode->textContent);
+
+                if ($label === 'Status:') {
+                    // Extract status - new value starts with "» "
+                    $newText = trim($newNode->textContent ?? '');
+                    $statusAtTime = ltrim($newText, '» ');
+                }
+                echo $nid . ' ' . $statusAtTime . "\n";
+
+                if ($label === 'Assigned:') {
+                    // Extract old assignee (could be a link or text)
+                    $oldLink = $xpath->query('.//a[contains(@class, "username")]', $oldNode);
+                    if ($oldLink->length > 0) {
+                        $assignedOld = trim($oldLink->item(0)->textContent);
+                    } else {
+                        $assignedOld = trim($oldNode->textContent ?? '');
+                    }
+
+                    // Extract new assignee - text starts with "» "
+                    $newLink = $xpath->query('.//a[contains(@class, "username")]', $newNode);
+                    if ($newLink->length > 0) {
+                        $assignedNew = trim($newLink->item(0)->textContent);
+                    } else {
+                        $newText = trim($newNode->textContent ?? '');
+                        $assignedNew = ltrim($newText, '» ');
+                    }
+                }
+            }
+
+            // Create events for assignment changes
+            if ($assignedOld !== null || $assignedNew !== null) {
+                // Someone was unassigned
+                if (!empty($assignedOld) && strtolower($assignedOld) !== 'unassigned') {
+                    $events[] = [
+                        'contributor' => $assignedOld,
+                        'date' => $commentDate,
+                        'type' => 'unassigned',
+                        'status' => $statusAtTime,
+                    ];
+                }
+
+                // Someone was assigned
+                if (!empty($assignedNew) && strtolower($assignedNew) !== 'unassigned') {
+                    $events[] = [
+                        'contributor' => $assignedNew,
+                        'date' => $commentDate,
+                        'type' => 'assigned',
+                        'status' => $statusAtTime,
+                    ];
+                }
+            }
+        }
+
+        // Check for pagination - look for a "next" pager link
+        $nextLink = $xpath->query('//li[contains(@class, "pager-next")]/a | //a[@rel="next"]');
+        if ($nextLink->length > 0) {
+            $pageNum++;
+        } else {
+            $hasMorePages = false;
+        }
+    }
+
+    return $events;
+}
+
+/**
  * Format timestamp to readable date or return empty if not available
  *
  * @param int|null $timestamp Unix timestamp
@@ -259,16 +450,19 @@ function formatTimestamp($timestamp) {
  * @param array $issues List of issue data from API
  * @param string $issuesCsvPath Path for issues CSV output
  * @param string $contributorsCsvPath Path for contributors CSV output
+ * @param string $assignmentsCsvPath Path for assignments CSV output
  * @param string $sprintStartDate The sprint start date for filtering issues
+ * @param string|null $sprintEndDate The sprint end date for filtering issues
  */
-function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sprintStartDate) {
+function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $assignmentsCsvPath, $sprintStartDate, $sprintEndDate) {
     echo "Processing " . count($issues) . " issues...\n\n";
 
     // Open CSV files
     $issuesCsv = fopen($issuesCsvPath, 'w');
     $contributorsCsv = fopen($contributorsCsvPath, 'w');
+    $assignmentsCsv = fopen($assignmentsCsvPath, 'w');
 
-    if ($issuesCsv === false || $contributorsCsv === false) {
+    if ($issuesCsv === false || $contributorsCsv === false || $assignmentsCsv === false) {
         echo "ERROR: Failed to open CSV files for writing.\n";
         return;
     }
@@ -295,6 +489,17 @@ function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sp
         'link',
         'project_name',
         'contributors'
+    ]);
+
+    fputcsv($assignmentsCsv, [
+        'nid',
+        'title',
+        'link',
+        'project',
+        'contributor',
+        'type',
+        'date',
+        'status'
     ]);
 
     $processedCount = 0;
@@ -372,7 +577,7 @@ function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sp
         ]);
 
         // Fetch contributors (commenters + author)
-        $contributors = fetchIssueContributors($nid, $sprintStartDate);
+        $contributors = fetchIssueContributors($nid, $sprintStartDate, $sprintEndDate);
 
         // Add issue author if available
         if (isset($issue['author']['id'])) {
@@ -396,32 +601,50 @@ function processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sp
             implode(', ', $contributors)
         ]);
 
-        echo "  - Project: $projectName, Status: $currentStatus, Contributors: " . count($contributors) . "\n";
+        // Fetch and write assignment events
+        $assignmentEvents = fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate);
+        foreach ($assignmentEvents as $event) {
+            fputcsv($assignmentsCsv, [
+                $nid,
+                $title,
+                $link,
+                $projectName,
+                $event['contributor'],
+                $event['type'],
+                $event['date'],
+                $event['status']
+            ]);
+        }
+
+        echo "  - Project: $projectName, Status: $currentStatus, Contributors: " . count($contributors) . ", Assignment events: " . count($assignmentEvents) . "\n";
     }
 
     fclose($issuesCsv);
     fclose($contributorsCsv);
+    fclose($assignmentsCsv);
 
     echo "\nCSV files created successfully!\n";
     echo "  - Issues CSV: $issuesCsvPath\n";
     echo "  - Contributors CSV: $contributorsCsvPath\n";
+    echo "  - Assignments CSV: $assignmentsCsvPath\n";
 }
 
 /**
  * Main function to run the script
  *
  * @param string $sprintStartDate Sprint start date in YYYY-MM-DD format
+ * @param string|null $sprintEndDate Sprint end date in YYYY-MM-DD format (optional)
  * @param int $taxonomyId Taxonomy term ID for the tag filter
  * @param string $outputDir Output directory for CSV files (optional)
  */
-function main($sprintStartDate, $taxonomyId, $outputDir = '.') {
+function main($sprintStartDate, $sprintEndDate, $taxonomyId, $outputDir = '.') {
     echo "=== Drupal.org Issue Status Collector ===\n\n";
 
     // Validate inputs
     if (empty($sprintStartDate)) {
         echo "ERROR: Sprint start date is required.\n";
-        echo "Usage: php get_current_status.php <sprint_start_date> [taxonomy_id]\n";
-        echo "Example: php get_current_status.php 2025-01-01 205151\n";
+        echo "Usage: php get_current_status.php <sprint_start_date> [sprint_end_date] [taxonomy_id]\n";
+        echo "Example: php get_current_status.php 2025-01-01 2025-01-31 205151\n";
         return;
     }
 
@@ -437,9 +660,10 @@ function main($sprintStartDate, $taxonomyId, $outputDir = '.') {
     $dateStr = date('Y-m-d_His');
     $issuesCsvPath = rtrim($outputDir, '/') . "/statissues_$dateStr.csv";
     $contributorsCsvPath = rtrim($outputDir, '/') . "/contributors_$dateStr.csv";
+    $assignmentsCsvPath = rtrim($outputDir, '/') . "/assignments_$dateStr.csv";
 
     // Fetch all issues
-    $issues = fetchAllIssues($sprintStartDate, $taxonomyId);
+    $issues = fetchAllIssues($sprintStartDate, $sprintEndDate, $taxonomyId);
 
     if (empty($issues)) {
         echo "No issues found matching criteria.\n";
@@ -447,7 +671,7 @@ function main($sprintStartDate, $taxonomyId, $outputDir = '.') {
     }
 
     // Process issues and create CSVs
-    processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $sprintStartDate);
+    processAndCreateCsvs($issues, $issuesCsvPath, $contributorsCsvPath, $assignmentsCsvPath, $sprintStartDate, $sprintEndDate);
 
     echo "\n=== Done ===\n";
 }
@@ -455,7 +679,14 @@ function main($sprintStartDate, $taxonomyId, $outputDir = '.') {
 // CLI entry point
 if (php_sapi_name() === 'cli') {
     $sprintStartDate = $argv[1] ?? '';
-    $taxonomyId = $argv[2] ?? 205151; // AI Initiative Sprint tag ID.
+    $sprintEndDate = $argv[2] ?? null;
+    $taxonomyId = $argv[3] ?? 205151; // AI Initiative Sprint tag ID.
 
-    main($sprintStartDate, $taxonomyId, 'status_files');
+    // If second argument looks like a taxonomy ID (numeric), treat it as such
+    if ($sprintEndDate !== null && is_numeric($sprintEndDate) && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $sprintEndDate)) {
+        $taxonomyId = $sprintEndDate;
+        $sprintEndDate = null;
+    }
+
+    main($sprintStartDate, $sprintEndDate, $taxonomyId, 'status_files');
 }
