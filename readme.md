@@ -23,7 +23,7 @@ Note that taxonomy id is optional and already defaults to the AI Initiative Spri
 Example if the sprint starts on January 1, 2025:
 
 ```bash
-php get_current_status.php 2025-01-01
+php get_current_status.php 2026-01-26 2026-01-27
 ```
 
 ## Output
