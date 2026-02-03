@@ -1,0 +1,12 @@
+{
+    "name": "ivanboring/ai_initiative_sprint",
+    "authors": [
+        {
+            "name": "Marcus Johansson",
+            "email": "me@marcusmailbox.com"
+        }
+    ],
+    "require": {
+        "chrome-php/chrome": "^1.15"
+    }
+}
