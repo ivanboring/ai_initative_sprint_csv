@@ -155,14 +155,9 @@ function fetchAllIssues($sprintStartDate, $sprintEndDate, $taxonomyId) {
                 $oldestOnPage = $changedTimestamp;
             }
 
-            // Include if created OR changed after sprint start (and before end date if specified)
-            $afterStart = ($changedTimestamp >= $sprintStartTimestamp || $createdTimestamp >= $sprintStartTimestamp);
-            $beforeEnd = ($sprintEndTimestamp === null || $createdTimestamp <= $sprintEndTimestamp || $changedTimestamp <= $sprintEndTimestamp);
-
-            if ($afterStart && $beforeEnd) {
-                $issues[] = $issue;
-                $pageIssueCount++;
-            }
+            // Get ALL issues.
+            $issues[] = $issue;
+            $pageIssueCount++;
         }
 
         echo "  Page $page: Found $pageIssueCount matching issues (oldest changed: " . date('Y-m-d H:i:s', $oldestOnPage) . ")\n";
@@ -395,7 +390,6 @@ function fetchAssignmentEvents($nid, $sprintStartDate, $sprintEndDate) {
                 }
 
                 if ($label === 'Assigned:') {
-                    print_r($comment);
                     // Extract old assignee (could be a link or text)
                     $oldLink = $xpath->query('.//a[contains(@class, "username")]', $oldNode);
                     if ($oldLink->length > 0) {
