@@ -166,14 +166,7 @@ function fetchAllIssues($sprintStartDate, $sprintEndDate, $taxonomyId) {
         // If oldest item on this page is still newer than sprint start, there might be more
         // Also check if there's a 'next' link
         if (isset($response['next'])) {
-            // If the oldest item on this page is older than sprint start,
-            // we've gone past our date range - stop fetching
-            if ($oldestOnPage < $sprintStartTimestamp) {
-                echo "  Reached issues older than sprint start date. Stopping pagination.\n";
-                $hasMorePages = false;
-            } else {
-                $page++;
-            }
+            $page++;
         } else {
             echo "  No more pages available.\n";
             $hasMorePages = false;
